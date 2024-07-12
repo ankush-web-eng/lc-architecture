@@ -1,9 +1,14 @@
 import express from 'express';
 import { createClient } from 'redis';
 import rateLimit from 'express-rate-limit';
+import cors from 'cors';
+
+require('dotenv').config();
 
 const app = express()
 app.use(express.json())
+app.use(cors());
+const SECRET_KEY = process.env.SECRET_KEY || "";
 
 const otpStore: Record<string, string> = {};
 
@@ -30,45 +35,62 @@ const passwordResetLimiter = rateLimit({
 app.get("/", (req, res) => res.send("Hello World!"))
 
 app.post("/submit", async (req, res) => {
-    const { problemId, userId, code, language } = req.body
-    // Push this to a database (maybe prisma.submission.create())
-    try {
-        await client.lPush("submissions", JSON.stringify({ problemId, userId, code, language }))
-        res.json({
-            message: "Submission received!"
-        })
-    } catch (error) {
-        res.status(500).json({
-            message: "Error submitting the code"
-        })
-    }
+  const { problemId, userId, code, language } = req.body
+  // Push this to a database (maybe prisma.submission.create())
+  try {
+    await client.lPush("submissions", JSON.stringify({ problemId, userId, code, language }))
+    res.json({
+      message: "Submission received!"
+    })
+  } catch (error) {
+    res.status(500).json({
+      message: "Error submitting the code"
+    })
+  }
 })
 
 app.post('/generate-otp', otpLimiter, (req, res) => {
-    const email = req.body.email;
-    if (!email) {
-      return res.status(400).json({ message: "Email is required" });
-    }
-    const otp = Math.floor(100000 + Math.random() * 900000).toString(); // generates a 6-digit OTP
-    otpStore[email] = otp
-  
-    console.log(`OTP for ${email}: ${otp}`); // Log the OTP to the console
-    res.status(200).json({ message: "OTP generated and logged" });
+  const email = req.body.email;
+  if (!email) {
+    return res.status(400).json({ message: "Email is required" });
+  }
+  const otp = Math.floor(100000 + Math.random() * 900000).toString(); // generates a 6-digit OTP
+  otpStore[email] = otp
+
+  console.log(`OTP for ${email}: ${otp}`); // Log the OTP to the console
+  res.status(200).json({ message: "OTP generated and logged" });
+});
+
+// Endpoint to reset password
+app.post('/reset-password', passwordResetLimiter, async(req, res) => {
+  const { email, otp, newPassword, token } = req.body;
+
+  let formData = new FormData();
+  formData.append('secret', SECRET_KEY);
+  formData.append('response', token);
+
+  const url = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
+  const result = await fetch(url, {
+    body: formData,
+    method: 'POST',
   });
-  
-  // Endpoint to reset password
-  app.post('/reset-password', passwordResetLimiter, (req, res) => {
-    const { email, otp, newPassword } = req.body;
-    if (!email || !otp || !newPassword) {
-      return res.status(400).json({ message: "Email, OTP, and new password are required" });
-    }
-    if (otpStore[email] === otp) {
-      console.log(`Password for ${email} has been reset to: ${newPassword}`);
-      delete otpStore[email]; // Clear the OTP after use
-      res.status(200).json({ message: "Password has been reset successfully" });
-    } else {
-      res.status(401).json({ message: "Invalid OTP" });
-    }
-  });
+  console.log(await result.json());
+  const challengeSucceeded = (await result.json()).success;
+
+  if (!challengeSucceeded) {
+    return res.status(403).json({ message: "Invalid reCAPTCHA token" });
+  }
+
+  if (!email || !otp || !newPassword) {
+    return res.status(400).json({ message: "Email, OTP, and new password are required" });
+  }
+  if (otpStore[email] === otp) {
+    console.log(`Password for ${email} has been reset to: ${newPassword}`);
+    delete otpStore[email]; // Clear the OTP after use
+    res.status(200).json({ message: "Password has been reset successfully" });
+  } else {
+    res.status(401).json({ message: "Invalid OTP" });
+  }
+});
 
 app.listen(3000, () => console.log('Server is running on port 3000'))
